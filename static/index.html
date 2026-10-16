@@ -49,9 +49,8 @@ const nextCtx = $('next').getContext('2d');
 let ws = null;
 let state = null;
 
-// Клетка — это не заливка, а место, где стоит человек.
-// Вид человека (телосложение, поза, волосы) стабильно выводится из
-// координаты клетки и вида фигуры, поэтому при перерисовке он не меняется.
+// Внешность тела выводится из его параметров хешем, а не случайным числом:
+// при перерисовке 60 раз в секунду тело не должно мерцать.
 function hash(a, b, c) {
   let h = (a * 374761393 + b * 668265263 + c * 2246822519) | 0;
   h = (h ^ (h >>> 13)) * 1274126177;
@@ -61,94 +60,245 @@ function hash(a, b, c) {
 const HAIR = ['#2b2119', '#4a2f1b', '#6b4423', '#8b5a2b', '#1c1c22', '#5a3a22', '#3a2a3a'];
 const SKIN = ['#f2c9a0', '#e0ac7e', '#c68863', '#a06a45', '#7d4f30'];
 
-// Силуэт человека ростом в клетку. Пропорции разные: это и даёт набор
-// разных людей вместо одинаковых значков.
-function drawPerson(ctx, x, y, size, color, alpha = 1, seed = 0) {
-  const cx = x * size + size / 2;
-  const bottom = y * size + size - 1;
-  const r1 = hash(x, y, seed * 7 + 1);
-  const r2 = hash(x, y, seed * 7 + 2);
-  const r3 = hash(x, y, seed * 7 + 3);
+// Одна фигура — одно тело. Клетки становятся суставами: позвоночник идёт по
+// самой длинной цепочке, всё остальное — конечности. Позвоночник красим в цвет
+// фигуры, конечности в цвет кожи, поэтому тело читается как тело.
+function bodyParts(cells) {
+  if (cells.length === 1) return { spine: cells.slice(), arms: [], legs: [], head: cells[0], tail: cells[0] };
 
-  // рост и ширина плеч: плечи заметно уже клетки, иначе тело становится капсулой
-  const h = size * (0.80 + r1 * 0.12);
-  const shoulder = size * (0.15 + r2 * 0.05);
+  const key = c => c[0] + ',' + c[1];
+  const index = new Map(cells.map((c, i) => [key(c), i]));
 
-  const headY = bottom - h + size * 0.10;
-  const headR = size * (0.068 + r3 * 0.014);
-  const neckY = headY + headR + size * 0.015;
-  const hipY = bottom - h * 0.46;
+  const adj = cells.map(() => []);
+  cells.forEach(([x, y], i) => {
+    [[1, 0], [-1, 0], [0, 1], [0, -1]].forEach(([dx, dy]) => {
+      const j = index.get((x + dx) + ',' + (y + dy));
+      if (j !== undefined) adj[i].push(j);
+    });
+  });
 
-  const skin = SKIN[Math.floor(r3 * SKIN.length) % SKIN.length];
-  const hair = HAIR[Math.floor(r1 * HAIR.length) % HAIR.length];
+  // корень — самая верхняя клетка, из неё считаем глубины
+  let root = 0;
+  cells.forEach(([x, y], i) => {
+    const [rx, ry] = cells[root];
+    if (y < ry || (y === ry && x < rx)) root = i;
+  });
+
+  const parent = new Array(cells.length).fill(-1);
+  const depth = new Array(cells.length).fill(-1);
+  const queue = [root];
+  depth[root] = 0;
+  const order = [];
+  while (queue.length) {
+    const i = queue.shift();
+    order.push(i);
+    adj[i].forEach(j => {
+      if (depth[j] === -1) {
+        depth[j] = depth[i] + 1;
+        parent[j] = i;
+        queue.push(j);
+      }
+    });
+  }
+
+  // низ — самая глубокая клетка, до неё и есть позвоночник
+  let bottom = root;
+  order.forEach(i => {
+    const [bx, by] = cells[bottom];
+    const [x, y] = cells[i];
+    if (depth[i] > depth[bottom] || (depth[i] === depth[bottom] && (y > by || (y === by && x > bx)))) bottom = i;
+  });
+
+  const spineIdx = [];
+  for (let i = bottom; i !== -1; i = parent[i]) spineIdx.push(i);
+  spineIdx.reverse();
+
+  const spineSet = new Set(spineIdx);
+  const spineEdges = new Set();
+  for (let k = 0; k + 1 < spineIdx.length; k++) {
+    spineEdges.add(spineIdx[k] + '-' + spineIdx[k + 1]);
+    spineEdges.add(spineIdx[k + 1] + '-' + spineIdx[k]);
+  }
+
+  const arms = [];
+  const legs = [];
+  order.forEach(i => {
+    const p = parent[i];
+    if (p === -1) return;
+    if (spineSet.has(i) && spineEdges.has(p + '-' + i)) return;
+    // отросток ниже середины позвоночника считаем ногой
+    const half = Math.floor(spineIdx.length / 2);
+    const branchAt = spineIdx.indexOf(p);
+    const limb = [p, i];
+    if (branchAt >= half) legs.push(limb);
+    else arms.push(limb);
+  });
+
+  return { spine: spineIdx, arms, legs, head: root, tail: bottom };
+}
+
+function jointPoint(cells, i, size) {
+  const [x, y] = cells[i];
+  return [x * size + size / 2, y * size + size / 2];
+}
+
+// Одно тело на фигуру: кости по суставам, голова сверху, конечности в стороны.
+function drawBody(ctx, cells, size, color, alpha = 1, seed = 0, bounds = null) {
+  if (!cells.length) return;
+  const parts = bodyParts(cells);
+  const r1 = hash(cells.length, seed, 1);
+  const r2 = hash(cells.length, seed, 2);
+
+  const skin = SKIN[Math.floor(r1 * SKIN.length) % SKIN.length];
+  const hair = HAIR[Math.floor(r2 * HAIR.length) % HAIR.length];
 
   ctx.globalAlpha = alpha;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
 
-  // ноги — длиннее и тоньше, чем торс
-  ctx.strokeStyle = skin;
-  ctx.lineWidth = size * 0.055;
-  const footY = bottom - size * 0.03;
-  ctx.beginPath();
-  ctx.moveTo(cx - shoulder * 0.6, footY);
-  ctx.lineTo(cx - shoulder * 0.15, hipY);
-  ctx.moveTo(cx + shoulder * 0.6, footY);
-  ctx.lineTo(cx + shoulder * 0.15, hipY);
-  ctx.stroke();
-
-  // туловище — узкое, с наклоном к плечам
+  // позвоночник — толстая кость в цвет фигуры
   ctx.strokeStyle = color;
-  ctx.lineWidth = shoulder * 0.95;
-  ctx.beginPath();
-  ctx.moveTo(cx, neckY);
-  ctx.lineTo(cx, hipY);
-  ctx.stroke();
-
-  // руки — поза зависит от человека
-  ctx.lineWidth = size * 0.048;
-  const arm = shoulder * 1.8;
-  ctx.beginPath();
-  if (r2 > 0.5) {
-    ctx.moveTo(cx, neckY + size * 0.02);
-    ctx.lineTo(cx - arm, hipY - size * 0.03);
-    ctx.moveTo(cx, neckY + size * 0.02);
-    ctx.lineTo(cx + arm, hipY - size * 0.03);
-  } else {
-    ctx.moveTo(cx, neckY + size * 0.02);
-    ctx.lineTo(cx - arm * 0.75, neckY + size * 0.14);
-    ctx.moveTo(cx, neckY + size * 0.02);
-    ctx.lineTo(cx + arm * 0.75, neckY + size * 0.14);
+  ctx.lineWidth = size * 0.34;
+  for (let k = 0; k + 1 < parts.spine.length; k++) {
+    const a = jointPoint(cells, parts.spine[k], size);
+    const b = jointPoint(cells, parts.spine[k + 1], size);
+    ctx.beginPath();
+    ctx.moveTo(a[0], a[1]);
+    ctx.lineTo(b[0], b[1]);
+    ctx.stroke();
   }
+
+  // конечности — тонкие, телесного цвета
+  ctx.strokeStyle = skin;
+  ctx.lineWidth = size * 0.17;
+  [...parts.arms, ...parts.legs].forEach(([from, to]) => {
+    const a = jointPoint(cells, from, size);
+    const b = jointPoint(cells, to, size);
+    // выносим кисть чуть дальше сустава, чтобы рука не обрубалась в клетке
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const len = Math.hypot(dx, dy) || 1;
+    const ex = b[0] + (dx / len) * size * 0.22;
+    const ey = b[1] + (dy / len) * size * 0.22;
+    ctx.beginPath();
+    ctx.moveTo(a[0], a[1]);
+    ctx.lineTo(ex, ey);
+    ctx.stroke();
+  });
+
+  // голова — за верхним суставом, наружу от шеи
+  const headAt = jointPoint(cells, parts.head, size);
+  let hx = 0;
+  let hy = -1;
+  if (parts.spine.length > 1) {
+    const next = jointPoint(cells, parts.spine[1], size);
+    hx = headAt[0] - next[0];
+    hy = headAt[1] - next[1];
+    const d = Math.hypot(hx, hy) || 1;
+    hx /= d; hy /= d;
+  }
+  const headR = size * (0.32 + r1 * 0.06);
+  // Границы поля: у превью холст маленький, а рисование смещено, поэтому
+  // сравнивать с шириной холста нельзя — границы передаём явно.
+  const minX = bounds ? bounds[0] : 0;
+  const maxX = bounds ? bounds[1] : (ctx.canvas ? ctx.canvas.width : Infinity);
+
+  // Голова выносится наружу от шеи. Если по эту сторону стена — разворачиваем
+  // голову внутрь, иначе она уедет за край поля и обрежется.
+  let headCx = headAt[0] + hx * headR * 0.9;
+  let headCy = headAt[1] + hy * headR * 0.9;
+  if (headCx - headR < minX || headCx + headR > maxX) {
+    headCx = headAt[0] - hx * headR * 0.9;
+    headCy = headAt[1] - hy * headR * 0.9;
+  }
+  headCy = Math.max(headCy, headR);
+
+  ctx.strokeStyle = skin;
+  ctx.lineWidth = size * 0.17;
+  ctx.beginPath();
+  ctx.moveTo(headAt[0], headAt[1]);
+  ctx.lineTo(headCx, headCy);
   ctx.stroke();
 
-  // голова
   ctx.fillStyle = skin;
   ctx.beginPath();
-  ctx.arc(cx, headY, headR, 0, Math.PI * 2);
+  ctx.arc(headCx, headCy, headR, 0, Math.PI * 2);
   ctx.fill();
 
-  // волосы
+  // волосы — шапка со стороны макушки
   ctx.fillStyle = hair;
   ctx.beginPath();
-  ctx.arc(cx, headY - headR * 0.18, headR * 1.02, Math.PI * 1.02, Math.PI * 2.02);
+  ctx.arc(headCx - hx * headR * 0.15, headCy - hy * headR * 0.15, headR * 0.88, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = skin;
+  ctx.beginPath();
+  ctx.arc(headCx + hx * headR * 0.34, headCy + hy * headR * 0.34, headR * 0.78, 0, Math.PI * 2);
   ctx.fill();
 
   ctx.globalAlpha = 1;
 }
 
-// Фигуры различаются не только цветом: у каждой свой вид людей.
-const PIECE_SEED = { 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7 };
+// Сгорание линии может разрезать фигуру на несвязанные куски, поэтому группу
+// делим на связные компоненты: обход от корня иначе не дойдёт до отрезанной
+// клетки, и та пропадёт с экрана, оставаясь на поле.
+function connectedComponents(cells) {
+  const key = c => c[0] + ',' + c[1];
+  const index = new Map(cells.map((c, i) => [key(c), i]));
+  const seen = new Array(cells.length).fill(false);
+  const comps = [];
+
+  for (let s = 0; s < cells.length; s++) {
+    if (seen[s]) continue;
+    const stack = [s];
+    seen[s] = true;
+    const comp = [];
+    while (stack.length) {
+      const i = stack.pop();
+      comp.push(cells[i]);
+      const [x, y] = cells[i];
+      [[1, 0], [-1, 0], [0, 1], [0, -1]].forEach(([dx, dy]) => {
+        const j = index.get((x + dx) + ',' + (y + dy));
+        if (j !== undefined && !seen[j]) {
+          seen[j] = true;
+          stack.push(j);
+        }
+      });
+    }
+    comps.push(comp);
+  }
+  return comps;
+}
+
+// Застывшие фигуры: клетки с одинаковой меткой собираем обратно в одно тело.
+function drawLocked(ctx, board, pids) {
+  const groups = new Map();
+  board.forEach((row, y) => row.forEach((kind, x) => {
+    if (!kind) return;
+    const pid = pids?.[y]?.[x] ?? 0;
+    const gkey = pid || `k${kind}-${x}-${y}`;
+    if (!groups.has(gkey)) groups.set(gkey, { kind, cells: [] });
+    groups.get(gkey).cells.push([x, y]);
+  }));
+  groups.forEach(({ kind, cells }) => {
+    connectedComponents(cells).forEach(part => {
+      drawBody(ctx, part, CELL, COLORS[kind], 1, kind + part.length, [0, 300]);
+    });
+  });
+}
 
 function drawPreview(ctx, view) {
   ctx.clearRect(0, 0, 120, 90);
   if (!view) return;
   const size = 20;
-  const maxX = Math.max(...view.cells.map(c => c[0])) + 1;
-  const maxY = Math.max(...view.cells.map(c => c[1])) + 1;
+  const cells = view.cells;
+  const minX = Math.min(...cells.map(c => c[0]));
+  const minY = Math.min(...cells.map(c => c[1]));
+  const maxX = Math.max(...cells.map(c => c[0])) + 1;
+  const maxY = Math.max(...cells.map(c => c[1])) + 1;
+  const norm = cells.map(([x, y]) => [x - minX, y - minY]);
   ctx.save();
-  ctx.translate((120 - maxX * size) / 2, (90 - maxY * size) / 2);
-  view.cells.forEach(([x, y]) => drawPerson(ctx, x, y, size, COLORS[view.kind], 1, PIECE_SEED[view.kind]));
+  ctx.translate((120 - (maxX - minX) * size) / 2, (90 - (maxY - minY) * size) / 2);
+  drawBody(ctx, norm, size, COLORS[view.kind], 1, view.kind, [0, (maxX - minX) * size]);
   ctx.restore();
 }
 
@@ -167,20 +317,16 @@ function render() {
     ctx.beginPath(); ctx.moveTo(0, j * CELL); ctx.lineTo(300, j * CELL); ctx.stroke();
   }
 
-  // уже лежащие человечки
-  state.board.forEach((row, y) => row.forEach((v, x) => {
-    if (v) drawPerson(ctx, x, y, CELL, COLORS[v], 1, PIECE_SEED[v]);
-  }));
+  // застывшие фигуры — по одному телу на фигуру
+  drawLocked(ctx, state.board, state.pids);
 
   // призрак — куда фигура упадёт
-  state.ghost.cells.forEach(([x, y]) => {
-    if (y >= 0) drawPerson(ctx, x, y, CELL, COLORS[state.ghost.kind], 0.22, PIECE_SEED[state.ghost.kind]);
-  });
+  const ghostCells = state.ghost.cells.filter(([, y]) => y >= 0);
+  if (ghostCells.length) drawBody(ctx, ghostCells, CELL, COLORS[state.ghost.kind], 0.22, state.ghost.kind, [0, 300]);
 
-  // текущая фигура
-  state.piece.cells.forEach(([x, y]) => {
-    if (y >= 0) drawPerson(ctx, x, y, CELL, COLORS[state.piece.kind], 1, PIECE_SEED[state.piece.kind]);
-  });
+  // текущая фигура — одно тело
+  const curCells = state.piece.cells.filter(([, y]) => y >= 0);
+  if (curCells.length) drawBody(ctx, curCells, CELL, COLORS[state.piece.kind], 1, state.piece.kind, [0, 300]);
 
   if (state.over) {
     ctx.fillStyle = 'rgba(0,0,0,0.65)';

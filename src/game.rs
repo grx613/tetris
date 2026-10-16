@@ -114,6 +114,8 @@ fn preview(kind: Kind) -> View {
 
 pub struct Game {
     board: Board,
+    pids: [[u16; 10]; 20],
+    next_pid: u16,
     cur: Piece,
     next: Kind,
     bag: Vec<Kind>,
@@ -127,6 +129,7 @@ pub struct Game {
 #[derive(Serialize)]
 pub struct Snapshot {
     board: Board,
+    pids: [[u16; 10]; 20],
     piece: View,
     ghost: View,
     next: View,
@@ -141,6 +144,8 @@ impl Game {
     pub fn new() -> Self {
         let mut g = Game {
             board: [[0; 10]; 20],
+            pids: [[0; 10]; 20],
+            next_pid: 1,
             cur: Piece::new(Kind::I),
             next: Kind::I,
             bag: Vec::new(),
@@ -242,11 +247,14 @@ impl Game {
 
     fn lock(&mut self) {
         let mut above_board = false;
+        let pid = self.next_pid;
+        self.next_pid = self.next_pid.wrapping_add(1).max(1);
         for (x, y) in self.cur.abs() {
             if y < 0 {
                 above_board = true;
             } else {
                 self.board[y as usize][x as usize] = self.cur.kind.id();
+                self.pids[y as usize][x as usize] = pid;
             }
         }
         if above_board {
@@ -259,22 +267,20 @@ impl Game {
     }
 
     fn clear_lines(&mut self) {
-        let kept: Vec<[u8; 10]> = self
-            .board
-            .iter()
-            .copied()
-            .filter(|row| row.contains(&0))
-            .collect();
+        let kept: Vec<usize> = (0..20).filter(|&y| self.board[y].contains(&0)).collect();
         let cleared = 20 - kept.len();
         if cleared == 0 {
             return;
         }
         let level = self.level();
         let mut board = [[0u8; 10]; 20];
-        for (i, row) in kept.into_iter().enumerate() {
-            board[cleared + i] = row;
+        let mut pids = [[0u16; 10]; 20];
+        for (i, &y) in kept.iter().enumerate() {
+            board[cleared + i] = self.board[y];
+            pids[cleared + i] = self.pids[y];
         }
         self.board = board;
+        self.pids = pids;
         self.lines += cleared as u32;
         self.score += [0, 100, 300, 500, 800][cleared] * level;
     }
@@ -318,6 +324,7 @@ impl Game {
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
             board: self.board,
+            pids: self.pids,
             piece: view(&self.cur),
             ghost: view(&self.ghost()),
             next: preview(self.next),
