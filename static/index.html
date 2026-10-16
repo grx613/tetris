@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tetris · Rust</title>
+<style>
+  body { margin: 0; min-height: 100vh; background: #0d0d12; color: #e6e6e6; font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; }
+  #wrap { display: flex; gap: 24px; align-items: flex-start; }
+  #board { background: #050508; border: 2px solid #2a2a35; box-shadow: 0 0 40px #0006; }
+  .side { display: flex; flex-direction: column; gap: 14px; width: 160px; }
+  .box { background: #16161e; border: 1px solid #2a2a35; border-radius: 8px; padding: 10px; }
+  .box h3 { margin: 0 0 6px; font-size: 11px; letter-spacing: 1.5px; color: #7a7a8c; text-transform: uppercase; font-weight: 600; }
+  canvas.mini { display: block; background: #050508; border-radius: 4px; }
+  .val { font-size: 24px; font-variant-numeric: tabular-nums; }
+  #status { font-size: 12px; color: #7a7a8c; min-height: 16px; }
+  .help { font-size: 12px; color: #7a7a8c; line-height: 1.8; }
+  kbd { background: #222230; border: 1px solid #343446; border-radius: 3px; padding: 0 4px; font-family: inherit; color: #bbb; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="board" width="300" height="600"></canvas>
+  <div class="side">
+    <div class="box"><h3>Hold</h3><canvas class="mini" id="hold" width="120" height="90"></canvas></div>
+    <div class="box"><h3>Next</h3><canvas class="mini" id="next" width="120" height="90"></canvas></div>
+    <div class="box"><h3>Счёт</h3><div class="val" id="score">0</div></div>
+    <div class="box"><h3>Линии</h3><div class="val" id="lines">0</div></div>
+    <div class="box"><h3>Уровень</h3><div class="val" id="level">1</div></div>
+    <div class="help">
+      <kbd>←</kbd> <kbd>→</kbd> сдвиг<br>
+      <kbd>↑</kbd> / <kbd>X</kbd> поворот<br>
+      <kbd>↓</kbd> мягкое падение<br>
+      <kbd>Space</kbd> жёсткое<br>
+      <kbd>C</kbd> hold<br>
+      <kbd>R</kbd> новая игра
+    </div>
+    <div id="status">подключение…</div>
+  </div>
+</div>
+<script>
+const COLORS = [null, '#22d3ee', '#facc15', '#a855f7', '#22c55e', '#ef4444', '#3b82f6', '#f97316'];
+const CELL = 30;
+const $ = id => document.getElementById(id);
+const boardCtx = $('board').getContext('2d');
+const holdCtx = $('hold').getContext('2d');
+const nextCtx = $('next').getContext('2d');
+let ws = null;
+let state = null;
+
+function drawCell(ctx, x, y, size, color, alpha = 1) {
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = color;
+  ctx.fillRect(x * size + 1, y * size + 1, size - 2, size - 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.25)';
+  ctx.fillRect(x * size + 1, y * size + 1, size - 2, 4);
+  ctx.globalAlpha = 1;
+}
+
+function drawPreview(ctx, view) {
+  ctx.clearRect(0, 0, 120, 90);
+  if (!view) return;
+  const size = 20;
+  const maxX = Math.max(...view.cells.map(c => c[0])) + 1;
+  const maxY = Math.max(...view.cells.map(c => c[1])) + 1;
+  ctx.save();
+  ctx.translate((120 - maxX * size) / 2, (90 - maxY * size) / 2);
+  view.cells.forEach(([x, y]) => drawCell(ctx, x, y, size, COLORS[view.kind]));
+  ctx.restore();
+}
+
+function render() {
+  const ctx = boardCtx;
+  ctx.clearRect(0, 0, 300, 600);
+  if (!state) return;
+
+  state.board.forEach((row, y) => row.forEach((v, x) => {
+    if (v) drawCell(ctx, x, y, CELL, COLORS[v]);
+  }));
+  state.ghost.cells.forEach(([x, y]) => {
+    if (y >= 0) drawCell(ctx, x, y, CELL, COLORS[state.ghost.kind], 0.25);
+  });
+  state.piece.cells.forEach(([x, y]) => {
+    if (y >= 0) drawCell(ctx, x, y, CELL, COLORS[state.piece.kind]);
+  });
+
+  if (state.over) {
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(0, 0, 300, 600);
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 28px system-ui, sans-serif';
+    ctx.fillText('GAME OVER', 150, 290);
+    ctx.font = '16px system-ui, sans-serif';
+    ctx.fillText('R — новая игра', 150, 320);
+  }
+
+  drawPreview(holdCtx, state.hold);
+  drawPreview(nextCtx, state.next);
+  $('score').textContent = state.score;
+  $('lines').textContent = state.lines;
+  $('level').textContent = state.level;
+}
+
+const KEY_ACTIONS = {
+  ArrowLeft: 'left',
+  ArrowRight: 'right',
+  ArrowDown: 'soft',
+  ArrowUp: 'rotate',
+  KeyX: 'rotate',
+  Space: 'hard',
+  KeyC: 'hold',
+  ShiftLeft: 'hold',
+};
+const REPEATABLE = new Set(['left', 'right', 'soft']);
+
+document.addEventListener('keydown', e => {
+  if (e.code === 'KeyR') {
+    if (!e.repeat) send({ type: 'restart' });
+    return;
+  }
+  const action = KEY_ACTIONS[e.code];
+  if (!action) return;
+  e.preventDefault();
+  if (e.repeat && !REPEATABLE.has(action)) return;
+  send({ type: 'input', action });
+});
+
+function send(msg) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+}
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+  ws.onopen = () => { $('status').textContent = 'в игре'; };
+  ws.onmessage = e => { state = JSON.parse(e.data); render(); };
+  ws.onclose = () => {
+    $('status').textContent = 'нет связи, переподключаюсь…';
+    setTimeout(connect, 1000);
+  };
+}
+
+connect();
+</script>
+</body>
+</html>
