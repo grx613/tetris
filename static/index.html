@@ -39,6 +39,7 @@
   </div>
 </div>
 <script>
+// Цвета фигур: I O T S Z J L — каждый человечек окрашен в цвет своей фигуры.
 const COLORS = [null, '#22d3ee', '#facc15', '#a855f7', '#22c55e', '#ef4444', '#3b82f6', '#f97316'];
 const CELL = 30;
 const $ = id => document.getElementById(id);
@@ -48,12 +49,45 @@ const nextCtx = $('next').getContext('2d');
 let ws = null;
 let state = null;
 
-function drawCell(ctx, x, y, size, color, alpha = 1) {
+// Силуэт человека в клетке: голова, туловище, руки, ноги.
+// Сетка остаётся клеточной — меняется только то, чем клетка залита.
+function drawPerson(ctx, x, y, size, color, alpha = 1) {
+  const s = size / 30;
+  const cx = x * size + size / 2;
+  const cy = y * size + size / 2;
+
   ctx.globalAlpha = alpha;
   ctx.fillStyle = color;
-  ctx.fillRect(x * size + 1, y * size + 1, size - 2, size - 2);
-  ctx.fillStyle = 'rgba(255,255,255,0.25)';
-  ctx.fillRect(x * size + 1, y * size + 1, size - 2, 4);
+  ctx.strokeStyle = color;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  // голова
+  ctx.beginPath();
+  ctx.arc(cx, cy - 10 * s, 3.9 * s, 0, Math.PI * 2);
+  ctx.fill();
+
+  // туловище
+  ctx.lineWidth = 6.5 * s;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - 5.5 * s);
+  ctx.lineTo(cx, cy + 3 * s);
+  ctx.stroke();
+
+  // руки
+  ctx.lineWidth = 2.6 * s;
+  ctx.beginPath();
+  ctx.moveTo(cx - 7 * s, cy - 2.5 * s);
+  ctx.lineTo(cx + 7 * s, cy - 2.5 * s);
+  ctx.stroke();
+
+  // ноги
+  ctx.beginPath();
+  ctx.moveTo(cx - 5 * s, cy + 11 * s);
+  ctx.lineTo(cx, cy + 3 * s);
+  ctx.lineTo(cx + 5 * s, cy + 11 * s);
+  ctx.stroke();
+
   ctx.globalAlpha = 1;
 }
 
@@ -65,7 +99,7 @@ function drawPreview(ctx, view) {
   const maxY = Math.max(...view.cells.map(c => c[1])) + 1;
   ctx.save();
   ctx.translate((120 - maxX * size) / 2, (90 - maxY * size) / 2);
-  view.cells.forEach(([x, y]) => drawCell(ctx, x, y, size, COLORS[view.kind]));
+  view.cells.forEach(([x, y]) => drawPerson(ctx, x, y, size, COLORS[view.kind]));
   ctx.restore();
 }
 
@@ -74,18 +108,33 @@ function render() {
   ctx.clearRect(0, 0, 300, 600);
   if (!state) return;
 
+  // сетка поля, чтобы ряды читались
+  ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+  ctx.lineWidth = 1;
+  for (let i = 1; i < 10; i++) {
+    ctx.beginPath(); ctx.moveTo(i * CELL, 0); ctx.lineTo(i * CELL, 600); ctx.stroke();
+  }
+  for (let j = 1; j < 20; j++) {
+    ctx.beginPath(); ctx.moveTo(0, j * CELL); ctx.lineTo(300, j * CELL); ctx.stroke();
+  }
+
+  // уже лежащие человечки
   state.board.forEach((row, y) => row.forEach((v, x) => {
-    if (v) drawCell(ctx, x, y, CELL, COLORS[v]);
+    if (v) drawPerson(ctx, x, y, CELL, COLORS[v]);
   }));
+
+  // призрак — куда фигура упадёт
   state.ghost.cells.forEach(([x, y]) => {
-    if (y >= 0) drawCell(ctx, x, y, CELL, COLORS[state.ghost.kind], 0.25);
+    if (y >= 0) drawPerson(ctx, x, y, CELL, COLORS[state.ghost.kind], 0.22);
   });
+
+  // текущая фигура
   state.piece.cells.forEach(([x, y]) => {
-    if (y >= 0) drawCell(ctx, x, y, CELL, COLORS[state.piece.kind]);
+    if (y >= 0) drawPerson(ctx, x, y, CELL, COLORS[state.piece.kind]);
   });
 
   if (state.over) {
-    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillStyle = 'rgba(0,0,0,0.65)';
     ctx.fillRect(0, 0, 300, 600);
     ctx.fillStyle = '#fff';
     ctx.textAlign = 'center';
