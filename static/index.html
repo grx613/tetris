@@ -49,47 +49,96 @@ const nextCtx = $('next').getContext('2d');
 let ws = null;
 let state = null;
 
-// Силуэт человека в клетке: голова, туловище, руки, ноги.
-// Сетка остаётся клеточной — меняется только то, чем клетка залита.
-function drawPerson(ctx, x, y, size, color, alpha = 1) {
-  const s = size / 30;
+// Клетка — это не заливка, а место, где стоит человек.
+// Вид человека (телосложение, поза, волосы) стабильно выводится из
+// координаты клетки и вида фигуры, поэтому при перерисовке он не меняется.
+function hash(a, b, c) {
+  let h = (a * 374761393 + b * 668265263 + c * 2246822519) | 0;
+  h = (h ^ (h >>> 13)) * 1274126177;
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+const HAIR = ['#2b2119', '#4a2f1b', '#6b4423', '#8b5a2b', '#1c1c22', '#5a3a22', '#3a2a3a'];
+const SKIN = ['#f2c9a0', '#e0ac7e', '#c68863', '#a06a45', '#7d4f30'];
+
+// Силуэт человека ростом в клетку. Пропорции разные: это и даёт набор
+// разных людей вместо одинаковых значков.
+function drawPerson(ctx, x, y, size, color, alpha = 1, seed = 0) {
   const cx = x * size + size / 2;
-  const cy = y * size + size / 2;
+  const bottom = y * size + size - 1;
+  const r1 = hash(x, y, seed * 7 + 1);
+  const r2 = hash(x, y, seed * 7 + 2);
+  const r3 = hash(x, y, seed * 7 + 3);
+
+  // рост и ширина плеч: плечи заметно уже клетки, иначе тело становится капсулой
+  const h = size * (0.80 + r1 * 0.12);
+  const shoulder = size * (0.15 + r2 * 0.05);
+
+  const headY = bottom - h + size * 0.10;
+  const headR = size * (0.068 + r3 * 0.014);
+  const neckY = headY + headR + size * 0.015;
+  const hipY = bottom - h * 0.46;
+
+  const skin = SKIN[Math.floor(r3 * SKIN.length) % SKIN.length];
+  const hair = HAIR[Math.floor(r1 * HAIR.length) % HAIR.length];
 
   ctx.globalAlpha = alpha;
-  ctx.fillStyle = color;
-  ctx.strokeStyle = color;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
 
-  // голова
+  // ноги — длиннее и тоньше, чем торс
+  ctx.strokeStyle = skin;
+  ctx.lineWidth = size * 0.055;
+  const footY = bottom - size * 0.03;
   ctx.beginPath();
-  ctx.arc(cx, cy - 10 * s, 3.9 * s, 0, Math.PI * 2);
+  ctx.moveTo(cx - shoulder * 0.6, footY);
+  ctx.lineTo(cx - shoulder * 0.15, hipY);
+  ctx.moveTo(cx + shoulder * 0.6, footY);
+  ctx.lineTo(cx + shoulder * 0.15, hipY);
+  ctx.stroke();
+
+  // туловище — узкое, с наклоном к плечам
+  ctx.strokeStyle = color;
+  ctx.lineWidth = shoulder * 0.95;
+  ctx.beginPath();
+  ctx.moveTo(cx, neckY);
+  ctx.lineTo(cx, hipY);
+  ctx.stroke();
+
+  // руки — поза зависит от человека
+  ctx.lineWidth = size * 0.048;
+  const arm = shoulder * 1.8;
+  ctx.beginPath();
+  if (r2 > 0.5) {
+    ctx.moveTo(cx, neckY + size * 0.02);
+    ctx.lineTo(cx - arm, hipY - size * 0.03);
+    ctx.moveTo(cx, neckY + size * 0.02);
+    ctx.lineTo(cx + arm, hipY - size * 0.03);
+  } else {
+    ctx.moveTo(cx, neckY + size * 0.02);
+    ctx.lineTo(cx - arm * 0.75, neckY + size * 0.14);
+    ctx.moveTo(cx, neckY + size * 0.02);
+    ctx.lineTo(cx + arm * 0.75, neckY + size * 0.14);
+  }
+  ctx.stroke();
+
+  // голова
+  ctx.fillStyle = skin;
+  ctx.beginPath();
+  ctx.arc(cx, headY, headR, 0, Math.PI * 2);
   ctx.fill();
 
-  // туловище
-  ctx.lineWidth = 6.5 * s;
+  // волосы
+  ctx.fillStyle = hair;
   ctx.beginPath();
-  ctx.moveTo(cx, cy - 5.5 * s);
-  ctx.lineTo(cx, cy + 3 * s);
-  ctx.stroke();
-
-  // руки
-  ctx.lineWidth = 2.6 * s;
-  ctx.beginPath();
-  ctx.moveTo(cx - 7 * s, cy - 2.5 * s);
-  ctx.lineTo(cx + 7 * s, cy - 2.5 * s);
-  ctx.stroke();
-
-  // ноги
-  ctx.beginPath();
-  ctx.moveTo(cx - 5 * s, cy + 11 * s);
-  ctx.lineTo(cx, cy + 3 * s);
-  ctx.lineTo(cx + 5 * s, cy + 11 * s);
-  ctx.stroke();
+  ctx.arc(cx, headY - headR * 0.18, headR * 1.02, Math.PI * 1.02, Math.PI * 2.02);
+  ctx.fill();
 
   ctx.globalAlpha = 1;
 }
+
+// Фигуры различаются не только цветом: у каждой свой вид людей.
+const PIECE_SEED = { 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7 };
 
 function drawPreview(ctx, view) {
   ctx.clearRect(0, 0, 120, 90);
@@ -99,7 +148,7 @@ function drawPreview(ctx, view) {
   const maxY = Math.max(...view.cells.map(c => c[1])) + 1;
   ctx.save();
   ctx.translate((120 - maxX * size) / 2, (90 - maxY * size) / 2);
-  view.cells.forEach(([x, y]) => drawPerson(ctx, x, y, size, COLORS[view.kind]));
+  view.cells.forEach(([x, y]) => drawPerson(ctx, x, y, size, COLORS[view.kind], 1, PIECE_SEED[view.kind]));
   ctx.restore();
 }
 
@@ -120,17 +169,17 @@ function render() {
 
   // уже лежащие человечки
   state.board.forEach((row, y) => row.forEach((v, x) => {
-    if (v) drawPerson(ctx, x, y, CELL, COLORS[v]);
+    if (v) drawPerson(ctx, x, y, CELL, COLORS[v], 1, PIECE_SEED[v]);
   }));
 
   // призрак — куда фигура упадёт
   state.ghost.cells.forEach(([x, y]) => {
-    if (y >= 0) drawPerson(ctx, x, y, CELL, COLORS[state.ghost.kind], 0.22);
+    if (y >= 0) drawPerson(ctx, x, y, CELL, COLORS[state.ghost.kind], 0.22, PIECE_SEED[state.ghost.kind]);
   });
 
   // текущая фигура
   state.piece.cells.forEach(([x, y]) => {
-    if (y >= 0) drawPerson(ctx, x, y, CELL, COLORS[state.piece.kind]);
+    if (y >= 0) drawPerson(ctx, x, y, CELL, COLORS[state.piece.kind], 1, PIECE_SEED[state.piece.kind]);
   });
 
   if (state.over) {
